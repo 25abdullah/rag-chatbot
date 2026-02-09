@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat App</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+    <div class="sidebar">
+          <button id="new-chat-btn">+ New Chat</button>
+          <div id = "chat-list"> </div>
+
+    </div>
+    <div class="chat-area">
+        <div id="messages">
+            <ul id = "chat-box"> </ul>
+            <!-- Messages display here -->
+        </div>
+        <div class="input-area">
+            <input type="file" id="fileInput" accept=".pdf,.docx,.txt" style="display:none">
+             <button id="uploadBtn" style="font-size: 20px; border: none; background: none; cursor: pointer;">📎</button>
+            <input type="text" id="messageInput" placeholder="Type message...">
+            <button id="button">Send</button>
+        </div>
+    </div>
+</div>
+    <script src="app.js"></script>
+</body>
+</html>
