@@ -263,8 +263,8 @@ def chunk_to_global(conversation_id):
             .eq("conversation_id", conversation_id)
             .execute()
         )
-        print(f"🔍 Message count: {response.count}")
-        print(f"🔍 Count % 10 = {response.count % 10}")
+        print(f"Message count: {response.count}")
+        print(f"Count % 10 = {response.count % 10}")
         
         if (response.count % 10 == 0):
             print(f"Chunking to global! Message count: {response.count}")
