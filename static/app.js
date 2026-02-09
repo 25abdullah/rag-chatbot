@@ -1,3 +1,5 @@
+
+//constants 
 const sidebar = document.querySelector('.sidebar');
 const messageArea = document.getElementById('chat-box');
 const sendButton = document.getElementById('button');
@@ -12,7 +14,7 @@ let currentConversationId = null
 let currentAIMessage = null;
 
 
-
+//initially disable sendbutton until chat button is created 
 sendButton.disabled = true;
 
 
@@ -95,10 +97,12 @@ async function selectConversation(conversationId) {
 
 
 
+//listener for uploading a file 
 uploadBtn.addEventListener('click', function() {
     fileInput.click();
 });
 
+//when file is clicked 
 fileInput.addEventListener('change', async function() {
     if (fileInput.files.length > 0) {
         const file = fileInput.files[0];
