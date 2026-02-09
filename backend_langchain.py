@@ -264,16 +264,16 @@ def chunk_to_global(conversation_id):
             .execute()
         )
         print(f"Message count: {response.count}")
-        print(f"Count % 10 = {response.count % 10}")
+        print(f"Count % 10 = {response.count % 2}")
         
-        if (response.count % 10 == 0):
+        if (response.count % 2 == 0):
             print(f"Chunking to global! Message count: {response.count}")
             get_last_ten = (
                 supabase_client.table("messages")
                 .select("*")
                 .eq("conversation_id", conversation_id)
                 .order("created_at", desc=True) 
-                .limit(10)
+                .limit(2)
                 .execute()
             )
             group_messages = ""
