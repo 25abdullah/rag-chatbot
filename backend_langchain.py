@@ -54,7 +54,13 @@ ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-hand
 # Image captioning for photo descriptions
 caption_tokenizer = GPT2TokenizerFast.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
 caption_processor = ViTImageProcessor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
-caption_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-image-captioning")  # You need to add this!
+caption_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-image-captioning")  
+
+
+
+CONV_RETRIEVAL_COUNT = 5
+GLOBAL_RETRIEVAL_COUNT = 3
+CHUNK_FREQUENCY = 2
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -147,19 +153,34 @@ async def chat_websocket(websocket: WebSocket, conversation_id: str):
     await websocket.accept() #get connection 
     try:
         while True:
-            data = await websocket.receive_text() 
-            #retrieve top 5 most similar from same conversation 
+            user_message = await websocket.receive_text()
+            
+            memory_text = retrieve_context(conversation_id, user_message)
+            
+            system_prompt = SYSTEM_PROMPT.format(memory_text=memory_text)
+            
+            ai_response = await generate_streaming_response(system_prompt, user_message, websocket)
+            store_messages(conversation_id, user_message, ai_response)
+            
+            embed_messages(conversation_id, user_message, ai_response)
+    except Exception as e:
+        print(f"Exception {e}")
+
+
+
+def retrieve_context(conversation_id, query):
+     #retrieve top 5 most similar from same conversation 
             same_conversation_retrieval = get_conversation_collection(conversation_id).similarity_search(
-                data,
-                k = 5
+                query,
+                k = CONV_RETRIEVAL_COUNT
             )
             #retrieve top 3 most similar from across all conversations 
             global_retrieval = get_global_collection().similarity_search (
-                data,
-                k = 3
+                query,
+                k = GLOBAL_RETRIEVAL_COUNT
             )
             #build up the context 
-            memory_text = "" 
+            memory_text = ""
             if same_conversation_retrieval:
                 for res in same_conversation_retrieval:
                     memory_text += res.page_content + " "
@@ -169,67 +190,49 @@ async def chat_websocket(websocket: WebSocket, conversation_id: str):
 
             if not memory_text:
                 memory_text = "No previous conversations yet. This is a fresh start!"
-            
-            #provide to prompt 
-            full_system_prompt = SYSTEM_PROMPT.format(memory_text=memory_text)
-            
-            #make AI response 
-            response = ai_model.chat.completions.create(
+        
+            return memory_text
+
+
+
+async def generate_streaming_response(full_system_prompt, user_message, websocket):
+    #make AI response 
+    response = ai_model.chat.completions.create(
                 model="arcee-ai/trinity-large-preview:free",
                 messages=[
                     {"role": "system", "content": full_system_prompt},
-                    {"role": "user", "content": data}
+                    {"role": "user", "content": user_message}
                 ],
                 stream=True
             )
             #build AI response 
-            build_response = ""
-            for chunk in response:
-                token = chunk.choices[0].delta.content
-                if token:
-                    build_response += token
-                    await websocket.send_text(token)
-            
-            #create title 
-            generate_title(conversation_id, data, build_response)
-            user_data_to_insert = {
-                "conversation_id": conversation_id,
-                "role": "user",
-                "content": data
-            }
-            ai_data_to_insert = {
-                "conversation_id": conversation_id,
-                "role": "assistant",
-                "content": build_response
-            }
+    build_response = ""
+    for chunk in response:
+        token = chunk.choices[0].delta.content
+        if token:
+            build_response += token
+            await websocket.send_text(token)
+    return build_response
 
-
-            #insert user + ai data into supabase 
-            supabase_client.table("messages").insert([
-                user_data_to_insert, 
-                ai_data_to_insert
-            ]).execute()
-
-
-            #embed user message 
-            get_conversation_collection(conversation_id).add_texts(
-                texts=[data],
+def store_messages(conversation_id, user_msg, ai_msg):
+    user_data_to_insert = {"conversation_id": conversation_id, "role": "user", "content": user_msg }
+    
+    ai_data_to_insert = {"conversation_id": conversation_id, "role": "assistant", "content": ai_msg}
+    
+    supabase_client.table("messages").insert([user_data_to_insert, ai_data_to_insert]).execute()
+    
+    
+def embed_messages(conversation_id, user_msg, ai_msg):
+    get_conversation_collection(conversation_id).add_texts(
+                texts=[user_msg],
                 ids=[f"{conversation_id}_user_{datetime.now().timestamp()}"])
-            #embed ai message 
-            get_conversation_collection(conversation_id).add_texts(
-                texts=[build_response],
+    
+    get_conversation_collection(conversation_id).add_texts(
+                texts=[ai_msg],
                 ids=[f"{conversation_id}_ai_{datetime.now().timestamp()}"])    
-            chunk_to_global(conversation_id)   
-    except Exception as e:
-        print(f"Exception {e}")
-
-
-
-
-
-
-
-
+    
+    chunk_to_global(conversation_id)   
+    
 
 
 #return full conversation given an id for chroma side (not supabase)
@@ -248,6 +251,7 @@ def get_global_collection():
         collection_name="user_123_global"
     )
 
+'''
 #create a relevant title if a title has not been created yet 
 def generate_title(conversation_id, user_msg, ai_msg):
     try:
@@ -265,7 +269,7 @@ def generate_title(conversation_id, user_msg, ai_msg):
              update_response = supabase_client.table("conversations").update({"title": new_title.choices[0].message.content}).eq("id", conversation_id).execute()
     except Exception as e:
         print(f"Exception {e}")
-
+'''
 
 
 #chunk every 10 messages into global collection for richer cross-conversation context
@@ -281,16 +285,16 @@ def chunk_to_global(conversation_id):
             .execute()
         )
         print(f"Message count: {response.count}")
-        print(f"Count % 10 = {response.count % 2}")
+        print(f"Count % {CHUNK_FREQUENCY} = {response.count % CHUNK_FREQUENCY}")
         
-        if (response.count % 2 == 0):
+        if (response.count % CHUNK_FREQUENCY == 0):
             print(f"Chunking to global! Message count: {response.count}")
             get_last_ten = (
                 supabase_client.table("messages")
                 .select("*")
                 .eq("conversation_id", conversation_id)
                 .order("created_at", desc=True) 
-                .limit(2)
+                .limit(CHUNK_FREQUENCY)
                 .execute()
             )
             group_messages = ""
@@ -401,7 +405,7 @@ async def upload_file(file: UploadFile):
 
 #extracting and processing information from file 
 def extract_text_from_file(file_location: Path, conversation_id):
- ext = file_location.suffix
+ ext = file_location.suffix.lower()
  if ext == ".pdf":
     loader = PyPDFLoader(file_location)
     documents = loader.load()
@@ -425,25 +429,25 @@ def extract_text_from_file(file_location: Path, conversation_id):
      generated_ids = ocr_model.generate(pixel_values)
      generated_text = ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
      if len(generated_text.split()) > 3:
-          get_conversation_collection(conversation_id).add_texts(
-                texts=[generated_text],
-                ids=[f"{conversation_id}_file_{datetime.now().timestamp()}"])
-          get_global_collection().add_texts(
-            texts=[f"[File: {file_location.name}] {generated_text}"],
-            ids=[f"global_file_{conversation_id}_file_{datetime.now().timestamp()}"])
+         store_to_both_collections(conversation_id, generated_text, file_location)
      else: 
         pixel_values = caption_processor(image, return_tensors="pt").pixel_values
         generated_ids = caption_model.generate(pixel_values)
         generated_text = caption_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        get_conversation_collection(conversation_id).add_texts(
-                texts=[generated_text],
-                ids=[f"{conversation_id}_file_{datetime.now().timestamp()}"])
-        get_global_collection().add_texts(
-            texts=[f"[File: {file_location.name}] {generated_text}"],
-            ids=[f"global_file_{conversation_id}_file_{datetime.now().timestamp()}"])
+        store_to_both_collections(conversation_id, generated_text, file_location)
 
      
-
+     
+     
+     
+def store_to_both_collections(conversation_id, generated_text, file_location):
+      get_conversation_collection(conversation_id).add_texts(
+                texts=[generated_text],
+                ids=[f"{conversation_id}_file_{datetime.now().timestamp()}"])
+      get_global_collection().add_texts(
+            texts=[f"[File: {file_location.name}] {generated_text}"],
+            ids=[f"global_file_{conversation_id}_file_{datetime.now().timestamp()}"])
+    
 
 
 #testing endpoint 
