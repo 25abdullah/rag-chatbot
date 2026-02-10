@@ -61,6 +61,8 @@ caption_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-i
 CONV_RETRIEVAL_COUNT = 5
 GLOBAL_RETRIEVAL_COUNT = 3
 CHUNK_FREQUENCY = 2
+UPLOAD_DIR = "uploaded_files"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -168,6 +170,11 @@ async def chat_websocket(websocket: WebSocket, conversation_id: str):
 
 
 
+
+
+
+
+
 def retrieve_context(conversation_id, query):
      #retrieve top 5 most similar from same conversation 
             same_conversation_retrieval = get_conversation_collection(conversation_id).similarity_search(
@@ -232,6 +239,8 @@ def embed_messages(conversation_id, user_msg, ai_msg):
                 ids=[f"{conversation_id}_ai_{datetime.now().timestamp()}"])    
     
     chunk_to_global(conversation_id)   
+    
+    
     
 
 
@@ -312,6 +321,8 @@ def chunk_to_global(conversation_id):
 
 
 
+
+
 #create a conversation
 @app.post("/conversations")
 async def create_conversation():
@@ -379,8 +390,7 @@ async def process_file(file: UploadFile, conversation_id):
     
     return {"status": "success", "filename": file.filename}
 
-UPLOAD_DIR = "uploaded_files"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+
 
 
 #uploading a file 
@@ -407,6 +417,21 @@ async def upload_file(file: UploadFile):
 def extract_text_from_file(file_location: Path, conversation_id):
  ext = file_location.suffix.lower()
  if ext == ".pdf":
+     process_pdf(file_location, conversation_id)
+ elif ext == '.png' or ext == '.jpg' or ext == '.jpeg':
+     generated_text_from_image = process_image_with_text(file_location)
+     
+     if len(generated_text_from_image.split()) > 3:
+         store_to_both_collections(conversation_id, generated_text_from_image, file_location)
+     else: 
+        generated_caption_of_image = process_image_photo(file_location)
+        store_to_both_collections(conversation_id, generated_caption_of_image, file_location)
+         
+         
+
+
+
+def process_pdf(file_location, conversation_id):
     loader = PyPDFLoader(file_location)
     documents = loader.load()
     text_splitter = RecursiveCharacterTextSplitter(
@@ -422,19 +447,24 @@ def extract_text_from_file(file_location: Path, conversation_id):
             texts=[f"[File: {file_location.name}] {content.page_content}"],
             ids=[f"global_file_{conversation_id}_{index}_{datetime.now().timestamp()}"]
         )
- elif ext == '.png' or ext == '.jpg' or ext == '.jpeg':
-     file_path = str(file_location)
-     image = Image.open(file_path)
-     pixel_values = ocr_processor(image, return_tensors="pt").pixel_values
-     generated_ids = ocr_model.generate(pixel_values)
-     generated_text = ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-     if len(generated_text.split()) > 3:
-         store_to_both_collections(conversation_id, generated_text, file_location)
-     else: 
-        pixel_values = caption_processor(image, return_tensors="pt").pixel_values
-        generated_ids = caption_model.generate(pixel_values)
-        generated_text = caption_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
-        store_to_both_collections(conversation_id, generated_text, file_location)
+
+def process_image_with_text(file_location):
+    file_path = str(file_location)
+    image = Image.open(file_path)
+    pixel_values = ocr_processor(image, return_tensors="pt").pixel_values
+    generated_ids = ocr_model.generate(pixel_values)
+    generated_text = ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return generated_text
+
+def process_image_photo(file_location):
+    file_path = str(file_location)
+    image = Image.open(file_path)
+    pixel_values = caption_processor(image, return_tensors="pt").pixel_values
+    generated_ids = caption_model.generate(pixel_values)
+    generated_text = caption_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return generated_text
+    
+    
 
      
      
