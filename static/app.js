@@ -80,7 +80,7 @@ async function selectConversation(conversationId) {
     
     event.currentTarget.parentElement.style.backgroundColor = '#d0e8ff';  
     
-    //close current 
+    //close current websocket
     if (ws) {
         ws.close();
     }

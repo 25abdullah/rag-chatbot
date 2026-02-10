@@ -15,6 +15,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
 import os
+from transformers import GPT2TokenizerFast, ViTImageProcessor, VisionEncoderDecoderModel, TrOCRProcessor
+from PIL import Image
 
 
 #initialize app and set up cors 
@@ -45,6 +47,14 @@ ai_model = OpenAI(
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 
+# TrOCR for text extraction from images
+ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
+ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
+
+# Image captioning for photo descriptions
+caption_tokenizer = GPT2TokenizerFast.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+caption_processor = ViTImageProcessor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+caption_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-image-captioning")  # You need to add this!
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -209,11 +219,18 @@ async def chat_websocket(websocket: WebSocket, conversation_id: str):
             get_conversation_collection(conversation_id).add_texts(
                 texts=[build_response],
                 ids=[f"{conversation_id}_ai_{datetime.now().timestamp()}"])    
-            
-            #chunk c
             chunk_to_global(conversation_id)   
     except Exception as e:
         print(f"Exception {e}")
+
+
+
+
+
+
+
+
+
 
 #return full conversation given an id for chroma side (not supabase)
 def get_conversation_collection(conversation_id):
@@ -384,21 +401,49 @@ async def upload_file(file: UploadFile):
 
 #extracting and processing information from file 
 def extract_text_from_file(file_location: Path, conversation_id):
- loader = PyPDFLoader(file_location)
- documents = loader.load()
- text_splitter = RecursiveCharacterTextSplitter(
+ ext = file_location.suffix
+ if ext == ".pdf":
+    loader = PyPDFLoader(file_location)
+    documents = loader.load()
+    text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=800, 
     chunk_overlap=150, 
     add_start_index=True)
- splits = text_splitter.split_documents(documents)
- for index, content in enumerate(splits): 
-    get_conversation_collection(conversation_id).add_texts(
+    splits = text_splitter.split_documents(documents)
+    for index, content in enumerate(splits): 
+        get_conversation_collection(conversation_id).add_texts(
                 texts=[content.page_content],
                 ids=[f"{conversation_id}_file_{index}_{datetime.now().timestamp()}"])
-    get_global_collection().add_texts(
+        get_global_collection().add_texts(
             texts=[f"[File: {file_location.name}] {content.page_content}"],
             ids=[f"global_file_{conversation_id}_{index}_{datetime.now().timestamp()}"]
         )
+ elif ext == '.png' or ext == '.jpg' or ext == '.jpeg':
+     file_path = str(file_location)
+     image = Image.open(file_path)
+     pixel_values = ocr_processor(image, return_tensors="pt").pixel_values
+     generated_ids = ocr_model.generate(pixel_values)
+     generated_text = ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+     if len(generated_text.split()) > 3:
+          get_conversation_collection(conversation_id).add_texts(
+                texts=[generated_text],
+                ids=[f"{conversation_id}_file_{datetime.now().timestamp()}"])
+          get_global_collection().add_texts(
+            texts=[f"[File: {file_location.name}] {generated_text}"],
+            ids=[f"global_file_{conversation_id}_file_{datetime.now().timestamp()}"])
+     else: 
+        pixel_values = caption_processor(image, return_tensors="pt").pixel_values
+        generated_ids = caption_model.generate(pixel_values)
+        generated_text = caption_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        get_conversation_collection(conversation_id).add_texts(
+                texts=[generated_text],
+                ids=[f"{conversation_id}_file_{datetime.now().timestamp()}"])
+        get_global_collection().add_texts(
+            texts=[f"[File: {file_location.name}] {generated_text}"],
+            ids=[f"global_file_{conversation_id}_file_{datetime.now().timestamp()}"])
+
+     
+
 
 
 #testing endpoint 
