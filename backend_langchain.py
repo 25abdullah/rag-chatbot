@@ -1,3 +1,4 @@
+# ==================== IMPORTS ====================
 from fastapi import FastAPI, WebSocket, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +14,6 @@ import uuid
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
-import os
 from transformers import (
     VisionEncoderDecoderModel,
     TrOCRProcessor,
@@ -23,6 +23,7 @@ from transformers import (
 from PIL import Image
 
 
+# ==================== APP SETUP & CONFIG ====================
 # initialize app and set up cors
 app = FastAPI()
 app.add_middleware(
@@ -35,7 +36,6 @@ app.add_middleware(
 
 
 load_dotenv()
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -45,6 +45,8 @@ ai_model = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KE
 
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
+
+# ==================== MODEL INITIALIZATION ====================
 
 # TrOCR for text extraction from images
 ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten")
@@ -60,19 +62,16 @@ caption_model = BlipForConditionalGeneration.from_pretrained(
     "Salesforce/blip-image-captioning-large"
 )
 
-
+# ==================== CONSTANTS ====================
 CONV_RETRIEVAL_COUNT = 5
 GLOBAL_RETRIEVAL_COUNT = 3
 CHUNK_FREQUENCY = 8
 UPLOAD_DIR = "uploaded_files"
-
-
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+# ==================== SYSTEM PROMPT ====================
 SYSTEM_PROMPT = """
 You are an intelligent, personalized AI assistant with exceptional 
 memory capabilities. You maintain context across conversations and use 
@@ -151,6 +150,9 @@ and conversational.
 """
 
 
+# ==================== WEBSOCKET HANDLER ====================
+
+
 # conversation -> voice
 # Given a converastion id, allows for users to chat with AI with streaming
 @app.websocket("/conversations/{conversation_id}/chat")
@@ -174,136 +176,6 @@ async def chat_websocket(websocket: WebSocket, conversation_id: str):
         print(f"Exception {e}")
 
 
-def retrieve_context(conversation_id, query):
-    """
-    This function retrives 5 different pieces of context: same conversation messages, same conversation files, other conversation
-    messages (excluding current conversation), other conversation files (excluding current), and chunks of other conversations (excluding this converesation).
-
-
-    :param conversation_id: conversation identifer for current conversation
-    :param query: the user message that is used to find the most relevant information.
-    """
-    same_conversation_messages = ""
-    same_conversation_files = ""
-    other_conversation_messages = ""
-    other_conversation_chunks = ""
-    other_conversation_files = ""
-
-    # 1. Messages from this conversation
-    try:
-        results = get_conversation_collection(conversation_id).similarity_search(
-            query, k=5, filter={"type": "message"}
-        )
-        for res in results:
-            same_conversation_messages += res.page_content + "\n"
-        print(f"[1] Conv messages: {len(results)} results")
-    except:
-        same_conversation_messages = ""
-
-    # 2. Files from this conversation
-    try:
-        results = get_conversation_collection(conversation_id).similarity_search(
-            query, k=3, filter={"type": "file"}
-        )
-        for res in results:
-            same_conversation_files += res.page_content + "\n"
-        print(f"[2] Conv files: {len(results)} results")
-
-    except:
-        same_conversation_files = ""
-
-    # 3. Messages from other conversations
-    try:
-        results = get_global_collection().similarity_search(
-            query,
-            k=3,
-            filter={
-                "$and": [
-                    {"type": "message"},
-                    {"conversation_id": {"$ne": conversation_id}},
-                ]
-            },
-        )
-        for res in results:
-            other_conversation_messages += res.page_content + "\n"
-        print(f"[3] Global messages (other convs): {len(results)} results")
-    except:
-        other_conversation_messages = ""
-
-    # 4. Chunks from other conversations
-    try:
-        results = get_global_collection().similarity_search(
-            query,
-            k=2,
-            filter={
-                "$and": [
-                    {"type": "chunk"},
-                    {"conversation_id": {"$ne": conversation_id}},
-                ]
-            },
-        )
-        for res in results:
-            other_conversation_chunks += res.page_content + "\n"
-        print(f"[4] Global chunks (other convs): {len(results)} results")
-    except:
-        other_conversation_chunks = ""
-
-    # 5. Files from other conversations
-    try:
-        results = get_global_collection().similarity_search(
-            query,
-            k=2,
-            filter={
-                "$and": [
-                    {"type": "file"},
-                    {"conversation_id": {"$ne": conversation_id}},
-                ]
-            },
-        )
-        for res in results:
-            other_conversation_files += res.page_content + "\n"
-        print(f"[5] Global files (other convs): {len(results)} results")
-    except:
-        other_conversation_files = ""
-
-    # Build structured context
-    memory_text = ""
-
-    if same_conversation_messages:
-        memory_text += (
-            "--- This Conversation Messages ---\n" + same_conversation_messages + "\n"
-        )
-
-    if other_conversation_messages or other_conversation_chunks:
-        memory_text += (
-            "--- Past Conversations Messages ---\n" + other_conversation_messages + "\n"
-        )
-
-    if other_conversation_chunks:
-        memory_text += (
-            "--- Global Conversation Chunks ---\n" + other_conversation_chunks + "\n"
-        )
-
-    if same_conversation_files:
-        memory_text += (
-            "--- Uploaded Documents From this Conversation ---\n"
-            + same_conversation_files
-            + "\n"
-        )
-
-    if other_conversation_files:
-        memory_text += (
-            "--- Uploaded Documents From Other Conversations ---\n"
-            + other_conversation_files
-            + "\n"
-        )
-
-    if not memory_text:
-        memory_text = "No previous conversations yet. This is a fresh start!"
-    print(f"=== FINAL CONTEXT ===\n{memory_text}\n=== END CONTEXT ===")
-    return memory_text
-
-
 async def generate_streaming_response(full_system_prompt, user_message, websocket):
     """
     The purpose of this function is to create the "streaming" response of LLM to the user.
@@ -314,7 +186,7 @@ async def generate_streaming_response(full_system_prompt, user_message, websocke
     """
     # make AI response
     response = ai_model.chat.completions.create(
-        model="meta-llama/llama-3.3-70b-instruct:free",
+        model="arcee-ai/trinity-large-preview:free",
         messages=[
             {"role": "system", "content": full_system_prompt},
             {"role": "user", "content": user_message},
@@ -331,6 +203,102 @@ async def generate_streaming_response(full_system_prompt, user_message, websocke
     return build_response
 
 
+# ==================== RAG - RETRIEVAL ====================
+
+
+def retrieve_context(conversation_id, query):
+    """
+    Retrieves relevant context from conversation and global collections using filtered metadata queries.
+    """
+    conv = get_conversation_collection(conversation_id)
+    glob = get_global_collection()
+    exclude_current = {"conversation_id": {"$ne": conversation_id}}
+
+    same_msgs = ""
+    for res in safe_search(conv, query, k=5, filter={"type": "message"}):
+        same_msgs += res.page_content + "\n"
+
+    same_files = ""
+    for res in safe_search(conv, query, k=3, filter={"type": "file"}):
+        same_files += res.page_content + "\n"
+
+    other_msgs = ""
+    for res in safe_search(
+        glob, query, k=3, filter={"$and": [{"type": "message"}, exclude_current]}
+    ):
+        other_msgs += res.page_content + "\n"
+
+    other_chunks = ""
+    for res in safe_search(
+        glob, query, k=2, filter={"$and": [{"type": "chunk"}, exclude_current]}
+    ):
+        other_chunks += res.page_content + "\n"
+
+    other_files = ""
+    for res in safe_search(
+        glob, query, k=2, filter={"$and": [{"type": "file"}, exclude_current]}
+    ):
+        other_files += res.page_content + "\n"
+
+    return build_context_string(
+        same_msgs, other_msgs, other_chunks, same_files, other_files
+    )
+
+
+def safe_search(collection, query, k, filter=None):
+    """
+    finds K number of similar results with respect to query.
+
+    :param collection: the collection to search from
+    :param query: the message that the user sent
+    :param k: the number of similar results that we are looking for
+    :param filter: to filter by metadata to find the type of data we want (message, file, chunk)
+    """
+    try:
+        results = collection.similarity_search(query=query, k=k, filter=filter)
+    except Exception as e:
+        results = []
+    return results
+
+
+def build_context_string(same_msgs, other_msgs, other_chunks, same_files, other_files):
+    """
+    The purpose of this function is to take all the 5 rag components and merge into one.
+
+    :param same_msgs: messaages retrieved from the same conversation.
+    :param other_msgs: messages retrieved from other conversations.
+    :param other_chunks: chunks of messages retrieved globally.
+    :param same_files: files retrieved from the same conversation.
+    :param other_files: files retrieved from other conversations.
+    """
+    memory_text = ""
+
+    if same_msgs:
+        memory_text += "--- This Conversation Messages ---\n" + same_msgs + "\n"
+
+    if other_msgs:
+        memory_text += "--- Past Conversations Messages ---\n" + other_msgs + "\n"
+
+    if other_chunks:
+        memory_text += "--- Past Conversation Summaries ---\n" + other_chunks + "\n"
+
+    if same_files:
+        memory_text += (
+            "--- Uploaded Documents From This Conversation ---\n" + same_files + "\n"
+        )
+
+    if other_files:
+        memory_text += (
+            "--- Uploaded Documents From Other Conversations ---\n" + other_files + "\n"
+        )
+
+    if not memory_text:
+        memory_text = "No previous conversations yet. This is a fresh start!"
+
+    return memory_text
+
+
+# ==================== SUPABASE STORAGE ====================
 def store_messages(conversation_id, user_msg, ai_msg):
     """
     The purpose of this function is to the store the AI and user message into supabase table.
@@ -354,6 +322,9 @@ def store_messages(conversation_id, user_msg, ai_msg):
     supabase_client.table("messages").insert(
         [user_data_to_insert, ai_data_to_insert]
     ).execute()
+
+
+# ==================== RAG - STORAGE ====================
 
 
 def embed_messages(conversation_id, user_msg, ai_msg):
@@ -400,24 +371,6 @@ def embed_messages(conversation_id, user_msg, ai_msg):
     chunk_to_global(conversation_id)
 
 
-# return full conversation given an id for chroma side (not supabase)
-def get_conversation_collection(conversation_id):
-    return Chroma(
-        persist_directory="./chroma_db",
-        embedding_function=embeddings,
-        collection_name=f"conv_{conversation_id}",
-    )
-
-
-# get full collection of all conversations
-def get_global_collection():
-    return Chroma(
-        persist_directory="./chroma_db",
-        embedding_function=embeddings,
-        collection_name="user_123_global",
-    )
-
-
 def chunk_to_global(conversation_id):
     """
     The purpose of this function is to store a large number messages (8 or so)
@@ -439,7 +392,7 @@ def chunk_to_global(conversation_id):
 
         if response.count % CHUNK_FREQUENCY == 0:
             print(f"Chunking to global! Message count: {response.count}")
-            get_last_ten = (
+            get_last_messages = (
                 supabase_client.table("messages")
                 .select("*")
                 .eq("conversation_id", conversation_id)
@@ -448,9 +401,9 @@ def chunk_to_global(conversation_id):
                 .execute()
             )
             group_messages = ""
-            rows = get_last_ten.data
+            rows = get_last_messages.data
             for row in rows:
-                group_messages += row["content"]
+                group_messages += row["content"] + "\n"
             get_global_collection().add_texts(
                 texts=[group_messages],
                 ids=[f"chunk_{conversation_id}_{datetime.now().timestamp()}"],
@@ -459,6 +412,30 @@ def chunk_to_global(conversation_id):
             print("Successfully chunked to global!")
     except Exception as e:
         print(f"Exception in chunk_to_global: {e}")
+
+
+# ==================== RAG - COLLECTION ACCESSORS ====================
+
+
+# return full conversation given an id for chroma side (not supabase)
+def get_conversation_collection(conversation_id):
+    return Chroma(
+        persist_directory="./chroma_db",
+        embedding_function=embeddings,
+        collection_name=f"conv_{conversation_id}",
+    )
+
+
+# get full collection of all conversations
+def get_global_collection():
+    return Chroma(
+        persist_directory="./chroma_db",
+        embedding_function=embeddings,
+        collection_name="user_123_global",
+    )
+
+
+# ==================== CRUD ENDPOINTS ====================
 
 
 # create a conversation
@@ -537,7 +514,7 @@ async def process_file(file: UploadFile, conversation_id):
     return {"status": "success", "filename": file.filename}
 
 
-# uploading a file
+# ==================== FILE PROCESSING ====================
 async def upload_file(file: UploadFile):
     random_uuid = uuid.uuid4()
     new_filename = f"{random_uuid}_{file.filename}"
@@ -560,6 +537,14 @@ async def upload_file(file: UploadFile):
 
 # extracting and processing information from file
 def extract_text_from_file(file_location: Path, conversation_id):
+    """
+    The purpose of this function is to extract the text from a file (whether it be an image or a pdf) and then store that information in the chroma collection for RAG.
+    The text could also be a caption of an image if the image does not have a lot of text/any text.
+
+    :param file_location: represents the location of the file that was uploaded by the user. This is used to extract the text from the file and also to reference the file in the stored text in chroma for RAG.
+    :type file_location: represents the location of the file.
+    :param conversation_id: represents the current conversation id.
+    """
     ext = file_location.suffix.lower()
     if ext == ".pdf":
         process_pdf(file_location, conversation_id)
@@ -651,6 +636,14 @@ def process_image_photo(file_location):
 
 
 def store_to_both_collections_file(conversation_id, generated_text, file_location):
+    """
+    The purpose of this function is to store the AI generated text and store and embed it  to this current conversation
+    and store and embed to the global function.
+
+    :param conversation_id: represents the current conversation id.
+    :param generated_text: represents the text that was generated by the AI after processing the file.
+    :param file_location: represents the location of the file.
+    """
     get_conversation_collection(conversation_id).add_texts(
         texts=[f"[File: {file_location.name}] {generated_text}"],
         ids=[f"{conversation_id}_file_{datetime.now().timestamp()}"],
@@ -673,24 +666,3 @@ def store_to_both_collections_file(conversation_id, generated_text, file_locatio
             }
         ],
     )
-
-
-"""
-#create a relevant title if a title has not been created yet 
-def generate_title(conversation_id, user_msg, ai_msg):
-    try:
-        response = supabase_client.table("conversations").select("title").eq('id', conversation_id).execute()
-        data = response.data
-        if data and data[0]['title'] is None:
-             new_title = ai_model.chat.completions.create(
-                model="arcee-ai/trinity-large-preview:free",
-                messages=[
-                    {"role": "system", "content": "Generate a short, informative 3-5 word title for this conversation. Return ONLY the title, nothing else."},
-                    {"role": "user", "content": user_msg + " " + ai_msg}
-                ],
-                stream=False 
-            )
-             update_response = supabase_client.table("conversations").update({"title": new_title.choices[0].message.content}).eq("id", conversation_id).execute()
-    except Exception as e:
-        print(f"Exception {e}")
-"""
