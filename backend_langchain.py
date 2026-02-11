@@ -3,7 +3,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client
 from openai import OpenAI
-from sentence_transformers import SentenceTransformer
 from datetime import datetime
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -15,7 +14,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from dotenv import load_dotenv
 import os
-from transformers import GPT2TokenizerFast, ViTImageProcessor, VisionEncoderDecoderModel, TrOCRProcessor
+from transformers import VisionEncoderDecoderModel, TrOCRProcessor, BlipProcessor,BlipForConditionalGeneration
 from PIL import Image
 
 
@@ -52,9 +51,8 @@ ocr_processor = TrOCRProcessor.from_pretrained("microsoft/trocr-base-handwritten
 ocr_model = VisionEncoderDecoderModel.from_pretrained("microsoft/trocr-base-handwritten")
 
 # Image captioning for photo descriptions
-caption_tokenizer = GPT2TokenizerFast.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
-caption_processor = ViTImageProcessor.from_pretrained("nlpconnect/vit-gpt2-image-captioning")
-caption_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-image-captioning")  
+caption_processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-large")
+caption_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-large")
 
 
 
@@ -62,6 +60,9 @@ CONV_RETRIEVAL_COUNT = 5
 GLOBAL_RETRIEVAL_COUNT = 3
 CHUNK_FREQUENCY = 8
 UPLOAD_DIR = "uploaded_files"
+
+
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
@@ -241,14 +242,20 @@ def retrieve_context(conversation_id, query):
     # Build structured context
     memory_text = ""
 
-    if same_conversation_messages or same_conversation_files:
-        memory_text += "--- This Conversation ---\n" + same_conversation_messages + same_conversation_files + "\n"
+    if same_conversation_messages:
+        memory_text += "--- This Conversation Messages ---\n" + same_conversation_messages + "\n"
 
     if other_conversation_messages or other_conversation_chunks:
-        memory_text += "--- Past Conversations ---\n" + other_conversation_messages + other_conversation_chunks + "\n"
+        memory_text += "--- Past Conversations Messages ---\n" + other_conversation_messages + "\n"
+    
+    if other_conversation_chunks:
+        memory_text += "--- Global Conversation Chunks ---\n" +  other_conversation_chunks + "\n"
 
-    if same_conversation_files or other_conversation_files:
-        memory_text += "--- Uploaded Documents ---\n" + same_conversation_files + other_conversation_files + "\n"
+    if same_conversation_files:
+        memory_text += "--- Uploaded Documents From this Conversation ---\n" + same_conversation_files + "\n"
+        
+    if other_conversation_files:
+        memory_text += "--- Uploaded Documents From Other Conversations ---\n" + other_conversation_files + "\n"
 
     if not memory_text:
         memory_text = "No previous conversations yet. This is a fresh start!"
@@ -260,7 +267,7 @@ def retrieve_context(conversation_id, query):
 async def generate_streaming_response(full_system_prompt, user_message, websocket):
     #make AI response 
     response = ai_model.chat.completions.create(
-                model="arcee-ai/trinity-large-preview:free",
+                model="meta-llama/llama-3.3-70b-instruct:free",
                 messages=[
                     {"role": "system", "content": full_system_prompt},
                     {"role": "user", "content": user_message}
@@ -514,9 +521,9 @@ def process_image_photo(file_location):
     file_path = str(file_location)
     image = Image.open(file_path)
     image = image.convert("RGB")
-    pixel_values = caption_processor(image, return_tensors="pt").pixel_values
-    generated_ids = caption_model.generate(pixel_values)
-    generated_text = caption_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    inputs = caption_processor(image, return_tensors="pt")
+    generated_ids = caption_model.generate(**inputs)
+    generated_text = caption_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
     return generated_text
     
     
