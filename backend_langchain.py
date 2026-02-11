@@ -60,7 +60,7 @@ caption_model = VisionEncoderDecoderModel.from_pretrained("nlpconnect/vit-gpt2-i
 
 CONV_RETRIEVAL_COUNT = 5
 GLOBAL_RETRIEVAL_COUNT = 3
-CHUNK_FREQUENCY = 2
+CHUNK_FREQUENCY = 8
 UPLOAD_DIR = "uploaded_files"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -176,30 +176,85 @@ async def chat_websocket(websocket: WebSocket, conversation_id: str):
 
 
 def retrieve_context(conversation_id, query):
-     #retrieve top 5 most similar from same conversation 
-            same_conversation_retrieval = get_conversation_collection(conversation_id).similarity_search(
-                query,
-                k = CONV_RETRIEVAL_COUNT
-            )
-            #retrieve top 3 most similar from across all conversations 
-            global_retrieval = get_global_collection().similarity_search (
-                query,
-                k = GLOBAL_RETRIEVAL_COUNT
-            )
-            #build up the context 
-            memory_text = ""
-            if same_conversation_retrieval:
-                for res in same_conversation_retrieval:
-                    memory_text += res.page_content + " "
-            if global_retrieval:
-                for res in global_retrieval:
-                    memory_text += res.page_content + " "
+    same_conversation_messages = ""
+    same_conversation_files = ""
+    other_conversation_messages = ""
+    other_conversation_chunks = ""
+    other_conversation_files = ""
 
-            if not memory_text:
-                memory_text = "No previous conversations yet. This is a fresh start!"
+    # 1. Messages from this conversation
+    try:
+        results = get_conversation_collection(conversation_id).similarity_search(
+            query, k=5, filter={"type": "message"}
+        )
+        for res in results:
+            same_conversation_messages += res.page_content + "\n"
+        print(f"[1] Conv messages: {len(results)} results")
+    except:
+        same_conversation_messages = ""
+
+    # 2. Files from this conversation
+    try:
+        results = get_conversation_collection(conversation_id).similarity_search(
+            query, k=3, filter={"type": "file"}
+        )
+        for res in results:
+            same_conversation_files += res.page_content + "\n"
+        print(f"[2] Conv files: {len(results)} results")
+            
+    except:
+        same_conversation_files = ""
+
+    # 3. Messages from other conversations
+    try:
+        results = get_global_collection().similarity_search(
+            query, k=3, filter={"$and": [{"type": "message"}, {"conversation_id": {"$ne": conversation_id}}]}
+        )
+        for res in results:
+            other_conversation_messages += res.page_content + "\n"
+        print(f"[3] Global messages (other convs): {len(results)} results")
+    except:
+        other_conversation_messages = ""
+
+    # 4. Chunks from other conversations
+    try:
+        results = get_global_collection().similarity_search(
+            query, k=2, filter={"$and": [{"type": "chunk"}, {"conversation_id": {"$ne": conversation_id}}]}
+        )
+        for res in results:
+            other_conversation_chunks += res.page_content + "\n"
+        print(f"[4] Global chunks (other convs): {len(results)} results")
+    except:
+        other_conversation_chunks = ""
+
+    # 5. Files from other conversations
+    try:
+        results = get_global_collection().similarity_search(
+            query, k=2, filter={"$and": [{"type": "file"}, {"conversation_id": {"$ne": conversation_id}}]}
+        )
+        for res in results:
+            other_conversation_files += res.page_content + "\n"
+        print(f"[5] Global files (other convs): {len(results)} results")
+    except:
+        other_conversation_files = ""
+
+    # Build structured context
+    memory_text = ""
+
+    if same_conversation_messages or same_conversation_files:
+        memory_text += "--- This Conversation ---\n" + same_conversation_messages + same_conversation_files + "\n"
+
+    if other_conversation_messages or other_conversation_chunks:
+        memory_text += "--- Past Conversations ---\n" + other_conversation_messages + other_conversation_chunks + "\n"
+
+    if same_conversation_files or other_conversation_files:
+        memory_text += "--- Uploaded Documents ---\n" + same_conversation_files + other_conversation_files + "\n"
+
+    if not memory_text:
+        memory_text = "No previous conversations yet. This is a fresh start!"
+    print(f"=== FINAL CONTEXT ===\n{memory_text}\n=== END CONTEXT ===")
+    return memory_text
         
-            return memory_text
-
 
 
 async def generate_streaming_response(full_system_prompt, user_message, websocket):
@@ -230,15 +285,31 @@ def store_messages(conversation_id, user_msg, ai_msg):
     
     
 def embed_messages(conversation_id, user_msg, ai_msg):
+    # Conversation collection
     get_conversation_collection(conversation_id).add_texts(
-                texts=[user_msg],
-                ids=[f"{conversation_id}_user_{datetime.now().timestamp()}"])
-    
+        texts=[user_msg],
+        ids=[f"{conversation_id}_user_{datetime.now().timestamp()}"],
+        metadatas=[{"type": "message", "role": "user", "conversation_id": conversation_id}]
+    )
     get_conversation_collection(conversation_id).add_texts(
-                texts=[ai_msg],
-                ids=[f"{conversation_id}_ai_{datetime.now().timestamp()}"])    
-    
-    chunk_to_global(conversation_id)   
+        texts=[ai_msg],
+        ids=[f"{conversation_id}_ai_{datetime.now().timestamp()}"],
+        metadatas=[{"type": "message", "role": "assistant", "conversation_id": conversation_id}]
+    )
+
+    # Global collection — individual messages for immediate cross-conversation recall
+    get_global_collection().add_texts(
+        texts=[user_msg],
+        ids=[f"global_{conversation_id}_user_{datetime.now().timestamp()}"],
+        metadatas=[{"type": "message", "role": "user", "conversation_id": conversation_id}]
+    )
+    get_global_collection().add_texts(
+        texts=[ai_msg],
+        ids=[f"global_{conversation_id}_ai_{datetime.now().timestamp()}"],
+        metadatas=[{"type": "message", "role": "assistant", "conversation_id": conversation_id}]
+    )
+    print(f"Embedded to conv + global for conversation: {conversation_id}")
+    chunk_to_global(conversation_id)
     
     
     
@@ -252,7 +323,7 @@ def get_conversation_collection(conversation_id):
         collection_name=f"conv_{conversation_id}"
     )
 
-#return all conversations 
+#get full collection of all conversations 
 def get_global_collection():
     return Chroma(
         persist_directory="./chroma_db",
@@ -260,25 +331,6 @@ def get_global_collection():
         collection_name="user_123_global"
     )
 
-'''
-#create a relevant title if a title has not been created yet 
-def generate_title(conversation_id, user_msg, ai_msg):
-    try:
-        response = supabase_client.table("conversations").select("title").eq('id', conversation_id).execute()
-        data = response.data
-        if data and data[0]['title'] is None:
-             new_title = ai_model.chat.completions.create(
-                model="arcee-ai/trinity-large-preview:free",
-                messages=[
-                    {"role": "system", "content": "Generate a short, informative 3-5 word title for this conversation. Return ONLY the title, nothing else."},
-                    {"role": "user", "content": user_msg + " " + ai_msg}
-                ],
-                stream=False 
-            )
-             update_response = supabase_client.table("conversations").update({"title": new_title.choices[0].message.content}).eq("id", conversation_id).execute()
-    except Exception as e:
-        print(f"Exception {e}")
-'''
 
 
 #chunk every 10 messages into global collection for richer cross-conversation context
@@ -310,10 +362,9 @@ def chunk_to_global(conversation_id):
             rows = get_last_ten.data
             for row in rows:
                 group_messages += row['content']
-            get_global_collection().add_texts(
-                texts=[group_messages], 
-                ids=[f"{conversation_id}_{datetime.now().timestamp()}"]
-            )
+            get_global_collection().add_texts( texts=[group_messages], 
+                                              ids=[f"chunk_{conversation_id}_{datetime.now().timestamp()}"],
+                                              metadatas=[{"type": "chunk", "conversation_id": conversation_id}])
             print("Successfully chunked to global!")
      except Exception as e:
          print(f"Exception in chunk_to_global: {e}")
@@ -422,10 +473,10 @@ def extract_text_from_file(file_location: Path, conversation_id):
      generated_text_from_image = process_image_with_text(file_location)
      
      if len(generated_text_from_image.split()) > 3:
-         store_to_both_collections(conversation_id, generated_text_from_image, file_location)
+         store_to_both_collections_file(conversation_id, generated_text_from_image, file_location)
      else: 
         generated_caption_of_image = process_image_photo(file_location)
-        store_to_both_collections(conversation_id, generated_caption_of_image, file_location)
+        store_to_both_collections_file(conversation_id, generated_caption_of_image, file_location)
          
          
 
@@ -439,18 +490,21 @@ def process_pdf(file_location, conversation_id):
     chunk_overlap=150, 
     add_start_index=True)
     splits = text_splitter.split_documents(documents)
-    for index, content in enumerate(splits): 
+    for index, content in enumerate(splits):
         get_conversation_collection(conversation_id).add_texts(
-                texts=[content.page_content],
-                ids=[f"{conversation_id}_file_{index}_{datetime.now().timestamp()}"])
+        texts=[content.page_content],
+        ids=[f"{conversation_id}_file_{index}_{datetime.now().timestamp()}"],
+        metadatas=[{"type": "file", "filename": file_location.name, "conversation_id": conversation_id}])
         get_global_collection().add_texts(
-            texts=[f"[File: {file_location.name}] {content.page_content}"],
-            ids=[f"global_file_{conversation_id}_{index}_{datetime.now().timestamp()}"]
-        )
+        texts=[f"[File: {file_location.name}] {content.page_content}"],
+        ids=[f"global_file_{conversation_id}_{index}_{datetime.now().timestamp()}"],
+        metadatas=[{"type": "file", "filename": file_location.name, "conversation_id": conversation_id}]
+    )
 
 def process_image_with_text(file_location):
     file_path = str(file_location)
     image = Image.open(file_path)
+    image = image.convert("RGB")
     pixel_values = ocr_processor(image, return_tensors="pt").pixel_values
     generated_ids = ocr_model.generate(pixel_values)
     generated_text = ocr_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
@@ -459,28 +513,43 @@ def process_image_with_text(file_location):
 def process_image_photo(file_location):
     file_path = str(file_location)
     image = Image.open(file_path)
+    image = image.convert("RGB")
     pixel_values = caption_processor(image, return_tensors="pt").pixel_values
     generated_ids = caption_model.generate(pixel_values)
     generated_text = caption_tokenizer.batch_decode(generated_ids, skip_special_tokens=True)[0]
     return generated_text
     
     
-
-     
-     
-     
-     
-def store_to_both_collections(conversation_id, generated_text, file_location):
-      get_conversation_collection(conversation_id).add_texts(
-                texts=[generated_text],
-                ids=[f"{conversation_id}_file_{datetime.now().timestamp()}"])
-      get_global_collection().add_texts(
-            texts=[f"[File: {file_location.name}] {generated_text}"],
-            ids=[f"global_file_{conversation_id}_file_{datetime.now().timestamp()}"])
+def store_to_both_collections_file(conversation_id, generated_text, file_location):
+    get_conversation_collection(conversation_id).add_texts(
+        texts=[f"[File: {file_location.name}] {generated_text}"],
+        ids=[f"{conversation_id}_file_{datetime.now().timestamp()}"],
+        metadatas=[{"type": "file", "filename": file_location.name, "conversation_id": conversation_id}]
+    )
+    get_global_collection().add_texts(
+        texts=[f"[File: {file_location.name}] {generated_text}"],
+        ids=[f"global_file_{conversation_id}_file_{datetime.now().timestamp()}"],
+        metadatas=[{"type": "file", "filename": file_location.name, "conversation_id": conversation_id}]
+    )
     
 
 
-#testing endpoint 
-@app.post("/test-upload")
-async def test_upload(file: UploadFile):
-    return {"filename": file.filename, "size": file.size}
+'''
+#create a relevant title if a title has not been created yet 
+def generate_title(conversation_id, user_msg, ai_msg):
+    try:
+        response = supabase_client.table("conversations").select("title").eq('id', conversation_id).execute()
+        data = response.data
+        if data and data[0]['title'] is None:
+             new_title = ai_model.chat.completions.create(
+                model="arcee-ai/trinity-large-preview:free",
+                messages=[
+                    {"role": "system", "content": "Generate a short, informative 3-5 word title for this conversation. Return ONLY the title, nothing else."},
+                    {"role": "user", "content": user_msg + " " + ai_msg}
+                ],
+                stream=False 
+            )
+             update_response = supabase_client.table("conversations").update({"title": new_title.choices[0].message.content}).eq("id", conversation_id).execute()
+    except Exception as e:
+        print(f"Exception {e}")
+'''
